@@ -49,7 +49,7 @@ from .serializers import (
     
     CotizacionDetalleSerializer, CotizacionPanelSerializer, LibroSerializer, PedidoSerializer
 
-    , AsesorSerializer, InstitucionSerializer    
+    , AsesorSerializer, InstitucionSerializer, AdopcionPanelSerializer
 )
 from .services_pdf import generar_pdf_cotizacion, generar_pdf_adopcion
 
@@ -418,19 +418,14 @@ class ExportarAdopcionPDFView(APIView):
 # ---------------------------
 class ListarAdopcionesView(APIView):
     def get(self, request):
-        qs = Adopcion.objects.select_related("cotizacion").order_by("-id")
+        qs = (
+            Adopcion.objects
+            .select_related("cotizacion", "cotizacion__institucion", "cotizacion__asesor")
+            .prefetch_related("cotizacion__detalles")
+            .order_by("-id")
+        )
 
-        data = []
-        for adop in qs:
-            data.append({
-                "id": adop.id,
-                "numero_cotizacion": adop.cotizacion.numero_cotizacion,
-                "institucion": adop.cotizacion.institucion.nombre,
-                "asesor": adop.cotizacion.asesor.nombre,
-                "fecha": adop.fecha_adopcion.strftime("%d/%m/%Y"),
-                "estado": adop.cotizacion.estado,
-            })
-
+        data = AdopcionPanelSerializer(qs, many=True).data
         return Response(data, status=200)
 
 

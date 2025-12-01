@@ -182,6 +182,8 @@ class AdopcionPanelSerializer(serializers.ModelSerializer):
     numero_cotizacion = serializers.CharField(source="cotizacion.numero_cotizacion", read_only=True)
     institucion = serializers.CharField(source="cotizacion.institucion.nombre", read_only=True)
     asesor = serializers.CharField(source="cotizacion.asesor.nombre", read_only=True)
+    tipo_venta = serializers.SerializerMethodField()
+    fecha = serializers.SerializerMethodField()
 
     class Meta:
         model = Adopcion
@@ -190,10 +192,32 @@ class AdopcionPanelSerializer(serializers.ModelSerializer):
             "numero_cotizacion",
             "institucion",
             "asesor",
-            "fecha_adopcion",
+            "tipo_venta",
+            "fecha",
             "modalidad",
             "cantidad_total",
         ]
+
+    def get_tipo_venta(self, obj):
+        """Lee el tipo de venta desde el primer detalle de la cotización."""
+        det = obj.cotizacion.detalles.first()
+        if not det:
+            return "—"
+
+        MAPEO = {
+            "PV": "Punto de Venta",
+            "PUNTO_DE_VENTA": "Punto de Venta",
+            "PUNTO DE VENTA": "Punto de Venta",
+            "FERIA": "Feria",
+            "CONSIGNA": "Consignación",
+        }
+
+        clave = (det.tipo_venta or "").upper().strip()
+        return MAPEO.get(clave, clave)
+
+    def get_fecha(self, obj):
+        return obj.fecha_adopcion.strftime("%d/%m/%Y")
+
 
 
 # ------------------------------------------------------------------------
