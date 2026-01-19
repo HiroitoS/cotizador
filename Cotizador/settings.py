@@ -37,10 +37,16 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+
+    # terceros
     "corsheaders",
     "rest_framework",
+    "django_filters",  # ✅ ESTE FALTABA
+
+    # app
     "cotizador_colegio.apps.CotizadorColegioConfig",
 ]
+
 
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",

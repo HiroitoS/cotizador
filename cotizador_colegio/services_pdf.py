@@ -36,12 +36,7 @@ def txt(v):
 # ====================================================
 
 def generar_pdf_cotizacion(cotizacion, response):
-    """Genera PDF horizontal de la cotización con cabeceras estandarizadas.
-
-    Cabeceras SIEMPRE: Editorial, Nivel, Grado, Área, Descripción, PVP 2026
-    Si PV/FERIA: + Precio IE, PPFF, Utilidad IE
-    Si CONSIGNA: + Precio BE, Precio Consigna
-    """
+    """Genera PDF horizontal de la cotización con tipo de venta como columna adicional."""
     doc = SimpleDocTemplate(
         response,
         pagesize=landscape(A4),
@@ -73,13 +68,11 @@ def generar_pdf_cotizacion(cotizacion, response):
     elementos.append(encabezado)
     elementos.append(Spacer(1, 0.5 * cm))
 
-    # ---- Datos del colegio ----
     inst = cotizacion.institucion
     asesor = cotizacion.asesor
     detalles = cotizacion.detalles.all()
-    tipo = detalles.first().tipo_venta if detalles.exists() else "—"
 
-    # Compatibilidad con nombre / nombre_ie
+    # ---- DATOS IE ----
     nombre_ie = getattr(inst, "nombre_ie", None) or getattr(inst, "nombre", "—")
 
     datos_ie = [
@@ -98,6 +91,7 @@ def generar_pdf_cotizacion(cotizacion, response):
         ["Correo:", txt(getattr(inst, "correo_institucional", ""))],
         ["", ""], ["", ""], ["", ""],
     ]
+
     tabla_ie = Table([[Table(datos_ie), Table(datos_ie2)]], colWidths=[12 * cm, 12 * cm])
     tabla_ie.setStyle(
         TableStyle([
@@ -108,16 +102,16 @@ def generar_pdf_cotizacion(cotizacion, response):
     elementos.append(tabla_ie)
     elementos.append(Spacer(1, 0.5 * cm))
 
-    # ---- Asesor comercial ----
+    # ---- DATOS ASESOR ----
     datos_asesor = [
         ["2. DATOS DEL REPRESENTANTE COMERCIAL", ""],
         ["Nombre:", txt(getattr(asesor, "nombre", ""))],
         ["Teléfono:", txt(getattr(asesor, "telefono", ""))],
-        ["Zona / Región:", txt(getattr(asesor, "region", getattr(asesor, "zona", "")))],
+        ["Zona / Región:", txt(getattr(asesor, "zona", ""))],
         ["Empresa / Editorial:", "BOOK EXPRESS"],
         ["Correo:", txt(getattr(asesor, "correo", ""))],
     ]
-    tabla_asesor = Table(datos_asesor, colWidths=[5 * cm, 16 * cm])
+    tabla_asesor = Table(datos_asesor, colWidths=[6 * cm, 16 * cm])
     tabla_asesor.setStyle(
         TableStyle([
             ("BOX", (0, 0), (-1, -1), 0.5, colors.grey),
@@ -125,23 +119,52 @@ def generar_pdf_cotizacion(cotizacion, response):
         ])
     )
     elementos.append(tabla_asesor)
-    elementos.append(Spacer(1, 0.5 * cm))
+    elementos.append(Spacer(1, 0.3 * cm))
 
-    # ---- Tabla principal (cabeceras estables + extras por tipo) ----
+    # ---- Tipo de Venta ----
+    primer_det = detalles.first()
+    if primer_det:
+        raw_tv = (primer_det.tipo_venta or "").upper().strip()
+        MAPEO = {
+            "PV": "Punto de Venta",
+            "PUNTO_DE_VENTA": "Punto de Venta",
+            "PUNTO DE VENTA": "Punto de Venta",
+            "FERIA": "Feria",
+            "CONSIGNA": "Consignación",
+        }
+        tipo_legible = MAPEO.get(raw_tv, raw_tv)
+    else:
+        tipo_legible = "—"
+
+    tabla_tipo = Table(
+        [
+            ["3. TIPO DE VENTA", ""],
+            ["Tipo de Venta:", tipo_legible],
+        ],
+        colWidths=[6 * cm, 16 * cm],
+    )
+    tabla_tipo.setStyle(
+        TableStyle([
+            ("BOX", (0, 0), (-1, -1), 0.5, colors.grey),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ])
+    )
+    elementos.append(tabla_tipo)
+    elementos.append(Spacer(1, 0.4 * cm))
+
+    # ---- TABLA PRINCIPAL con columna TIPO DE VENTA ----
     headers = [
-        "Editorial", "Nivel", "Grado", "Área", "Descripción", "PVP 2026"
+        "Editorial", "Nivel", "Grado", "Área", "Descripción", "PVP 2026", "Tipo Venta"
     ]
-    tipo_upper = (tipo or "").upper().strip()
-    if tipo_upper in ("FERIA", "PV", "PUNTO_DE_VENTA", "PUNTO DE VENTA"):
+
+    tipo_up = raw_tv if primer_det else "PV"
+
+    if tipo_up in ("FERIA", "PV", "PUNTO_DE_VENTA", "PUNTO DE VENTA"):
         headers += ["Precio IE", "PPFF", "Utilidad IE"]
         modo = "PV"
-    elif tipo_upper == "CONSIGNA":
+    else:
         headers += ["Precio BE", "Precio Consigna"]
         modo = "CONSIGNA"
-    else:
-        # fallback (trátalo como PV)
-        headers += ["Precio IE", "PPFF", "Utilidad IE"]
-        modo = "PV"
 
     data = [headers]
 
@@ -152,23 +175,22 @@ def generar_pdf_cotizacion(cotizacion, response):
             d.libro.grado,
             d.libro.area,
             d.libro.descripcion_completa,
-            mon(d.libro.pvp_2026_con_igv),  # SIEMPRE PVP 2026
+            mon(d.libro.pvp_2026_con_igv),
+            tipo_legible,
         ]
         if modo == "PV":
             fila += [
-                mon(getattr(d, "precio_ie", None)),
-                mon(getattr(d, "precio_ppff", None)),
-                mon(getattr(d, "utilidad_ie", None)),
+                mon(d.precio_ie),
+                mon(d.precio_ppff),
+                mon(d.utilidad_ie),
             ]
-        else:  # CONSIGNA
+        else:
             fila += [
-                mon(getattr(d, "precio_be", None)),        # BE real (puede ser > PVP)
-                mon(getattr(d, "precio_consigna", None)),
+                mon(d.precio_be),
+                mon(d.precio_consigna),
             ]
         data.append(fila)
 
-    # Ajuste de anchos: descripción más amplia para evitar desbordes
-    # (Deja que ReportLab calcule, pero con un leve sesgo vía repeatRows y estilos)
     tabla = Table(data, repeatRows=1)
     tabla.setStyle(
         TableStyle([
@@ -178,17 +200,15 @@ def generar_pdf_cotizacion(cotizacion, response):
             ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
             ("FONTSIZE", (0, 0), (-1, -1), 8),
             ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.lightgrey]),
         ])
     )
     elementos.append(tabla)
     elementos.append(Spacer(1, 0.7 * cm))
 
-    # ---- Pie de página ----
     pie = Paragraph(
         (
             f"<para align='center'><font size=8 color=grey>"
-            f"Book Express © {datetime.now().year} – Generado automáticamente por el sistema Book Express."
+            f"Book Express © {datetime.now().year} – Generado automáticamente."
             f"</font></para>"
         ),
         styles["Normal"],
@@ -203,10 +223,7 @@ def generar_pdf_cotizacion(cotizacion, response):
 # ====================================================
 
 def generar_pdf_adopcion(adopcion, response):
-    """Genera el PDF horizontal de la ficha de adopción.
-
-    Cabeceras SIEMPRE: Editorial, Nivel, Grado, Área, Descripción, PVP 2026, Cantidad, Mes de Lectura
-    """
+    """Genera PDF horizontal de la ficha de adopción."""
     doc = SimpleDocTemplate(
         response,
         pagesize=landscape(A4),
@@ -215,7 +232,6 @@ def generar_pdf_adopcion(adopcion, response):
     elementos = []
     styles = getSampleStyleSheet()
 
-    # ---- Encabezado ----
     logo_path = os.path.join(
         settings.BASE_DIR, "cotizador_colegio", "static", "img", "img_book_express.png"
     )
@@ -238,74 +254,101 @@ def generar_pdf_adopcion(adopcion, response):
     elementos.append(encabezado)
     elementos.append(Spacer(1, 0.3 * cm))
 
-    # ---- Datos colegio y asesor ----
     cot = adopcion.cotizacion
-    inst = getattr(cot, "institucion", None)
-    asesor = getattr(cot, "asesor", None)
+    inst = cot.institucion
+    asesor = cot.asesor
 
-    nombre_ie = getattr(inst, "nombre_ie", None) or getattr(inst, "nombre", "—")
-
+    # ---- Datos del colegio ----
     datos_ie = [
         ["1. DATOS DE LA INSTITUCIÓN EDUCATIVA", ""],
-        ["Nombre IE:", txt(getattr(inst, "nombre", nombre_ie))],
+        ["Nombre IE:", txt(inst.nombre)],
         ["Nivel educativo:", txt(getattr(inst, "nivel_educativo", ""))],
-        ["Dirección:", txt(getattr(inst, "direccion", ""))],
-        ["Provincia:", txt(getattr(inst, "provincia", ""))],
-        ["Teléfono:", txt(getattr(inst, "telefono", ""))],
-        ["Directivo(a):", txt(getattr(inst, "director", ""))],
+        ["Dirección:", txt(inst.direccion)],
+        ["Provincia:", txt(inst.provincia)],
+        ["Teléfono:", txt(inst.telefono)],
+        ["Directivo(a):", txt(inst.director)],
     ]
     datos_ie2 = [
         ["Código Modular:", txt(getattr(inst, "codigo_modular", ""))],
-        ["Distrito:", txt(getattr(inst, "distrito", ""))],
-        ["Departamento:", txt(getattr(inst, "departamento", ""))],
-        ["Correo:", txt(getattr(inst, "correo_institucional", ""))],
+        ["Distrito:", txt(inst.distrito)],
+        ["Departamento:", txt(inst.departamento)],
+        ["Correo:", txt(inst.correo_institucional)],
         ["", ""], ["", ""], ["", ""],
     ]
-    tabla_ie = Table(
-        [[
-            Table(datos_ie, colWidths=[4.3 * cm, 7.7 * cm]),
-            Table(datos_ie2, colWidths=[4.3 * cm, 7.7 * cm]),
-        ]],
-        colWidths=[12 * cm, 12 * cm],
-    )
+
+    tabla_ie = Table([[Table(datos_ie), Table(datos_ie2)]], colWidths=[12 * cm, 12 * cm])
     tabla_ie.setStyle(
         TableStyle([
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("BOX", (0, 0), (-1, -1), 0.4, colors.grey),
-            ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ("LEFTPADDING", (0, 0), (-1, -1), 2),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ])
     )
     elementos.append(tabla_ie)
     elementos.append(Spacer(1, 0.3 * cm))
 
+    # ---- Datos del asesor ----
     datos_asesor = [
         ["2. DATOS DEL REPRESENTANTE COMERCIAL", ""],
-        ["Nombre:", txt(getattr(asesor, "nombre", ""))],
-        ["Teléfono:", txt(getattr(asesor, "telefono", ""))],
-        ["Zona / Región:", txt(getattr(asesor, "region", getattr(asesor, "zona", "")))],
+        ["Nombre:", txt(asesor.nombre)],
+        ["Teléfono:", txt(asesor.telefono)],
+        ["Zona / Región:", txt(asesor.zona)],
         ["Empresa / Editorial:", "BOOK EXPRESS"],
-        ["Correo:", txt(getattr(asesor, "correo", ""))],
+        ["Correo:", txt(asesor.correo)],
     ]
     tabla_asesor = Table(datos_asesor, colWidths=[5 * cm, 16 * cm])
     tabla_asesor.setStyle(
         TableStyle([
             ("BOX", (0, 0), (-1, -1), 0.4, colors.grey),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ("LEFTPADDING", (0, 0), (-1, -1), 2),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 2),
         ])
     )
     elementos.append(tabla_asesor)
     elementos.append(Spacer(1, 0.4 * cm))
 
-    # ---- Detalle (cabeceras unificadas con PVP 2026) ----
+    # ---- Tipo de Venta ----
+    primer_det = cot.detalles.first()
+    if primer_det:
+        raw_tv = (primer_det.tipo_venta or "").upper().strip()
+        MAPEO = {
+            "PV": "Punto de Venta",
+            "PUNTO_DE_VENTA": "Punto de Venta",
+            "PUNTO DE VENTA": "Punto de Venta",
+            "FERIA": "Feria",
+            "CONSIGNA": "Consignación",
+        }
+        tipo_legible = MAPEO.get(raw_tv, raw_tv)
+    else:
+        tipo_legible = "—"
+
+    tabla_tipo = Table(
+        [
+            ["3. TIPO DE VENTA", ""],
+            ["Tipo de Venta:", tipo_legible],
+        ],
+        colWidths=[5 * cm, 16 * cm],
+    )
+    tabla_tipo.setStyle(
+        TableStyle([
+            ("BOX", (0, 0), (-1, -1), 0.4, colors.grey),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ])
+    )
+    elementos.append(tabla_tipo)
+    elementos.append(Spacer(1, 0.4 * cm))
+
+    # ---- TABLA PRINCIPAL CON TIPO DE VENTA ----
     headers = [
-        "Editorial", "Nivel", "Grado", "Área", "Descripción", "PVP 2026",
-        "Cantidad", "Mes de Lectura"
+        "Editorial",
+        "Nivel",
+        "Grado",
+        "Área",
+        "Descripción",
+        "PVP 2026",
+        "Tipo Venta",
+        "Cantidad",
+        "Mes de Lectura"
     ]
+
     data = [headers]
 
     for d in adopcion.detalles.all():
@@ -317,7 +360,8 @@ def generar_pdf_adopcion(adopcion, response):
             libro.grado,
             libro.area,
             libro.descripcion_completa,
-            mon(getattr(libro, "pvp_2026_con_igv", None)),
+            mon(libro.pvp_2026_con_igv),
+            tipo_legible,
             d.cantidad_adoptada,
             d.mes_lectura if "lector" in area_lower else "—",
         ])
@@ -325,7 +369,10 @@ def generar_pdf_adopcion(adopcion, response):
     tabla = Table(
         data,
         repeatRows=1,
-        colWidths=[3.0 * cm, 2.2 * cm, 2.2 * cm, 2.5 * cm, 8.0 * cm, 2.5 * cm, 2.5 * cm, 3.0 * cm],
+        colWidths=[
+            3 * cm, 2.3 * cm, 2.3 * cm, 2.5 * cm,
+            8.2 * cm, 2.6 * cm, 2.5 * cm, 2.5 * cm, 3 * cm
+        ],
     )
     tabla.setStyle(
         TableStyle([
@@ -335,9 +382,6 @@ def generar_pdf_adopcion(adopcion, response):
             ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
             ("FONTSIZE", (0, 0), (-1, -1), 7),
             ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.lightgrey]),
-            ("LEFTPADDING", (0, 0), (-1, -1), 1),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 1),
         ])
     )
     elementos.append(tabla)
@@ -347,20 +391,18 @@ def generar_pdf_adopcion(adopcion, response):
     firmas = [
         ["___________________________", "___________________________"],
         ["Directivo(a)", "Asesor Comercial"],
-        [txt(getattr(inst, "director", "")), txt(getattr(asesor, "nombre", ""))],
+        [txt(inst.director), txt(asesor.nombre)],
     ]
     tabla_firmas = Table(firmas, colWidths=[12 * cm, 12 * cm])
     tabla_firmas.setStyle(
         TableStyle([
             ("ALIGN", (0, 0), (-1, -1), "CENTER"),
             ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ("TOPPADDING", (0, 0), (-1, -1), 6),
         ])
     )
     elementos.append(tabla_firmas)
     elementos.append(Spacer(1, 0.4 * cm))
 
-    # ---- Pie ----
     pie = Paragraph(
         (
             f"<para align='center'><font size=7 color=grey>"

@@ -1,245 +1,259 @@
 from rest_framework import serializers
 from .models import (
-    Libro,
-    Cotizacion,
-    DetalleCotizacion,
+    Editorial,
+    Producto,
     InstitucionEducativa,
     AsesorComercial,
+    Cotizacion,
+    DetalleCotizacion,
     Adopcion,
     DetalleAdopcion,
     Pedido,
+    DetallePedido,
 )
 
-# ------------------------------------------------------------------------
-# LIBROS
-# ------------------------------------------------------------------------
-class LibroSerializer(serializers.ModelSerializer):
+# ==========================
+# PRODUCTOS
+# ==========================
+class EditorialSerializer(serializers.ModelSerializer):
     class Meta:
-        model = Libro
+        model = Editorial
+        fields = ["id", "nombre", "estado"]
+
+
+class ProductoSerializer(serializers.ModelSerializer):
+    editorial_nombre = serializers.CharField(source="editorial.nombre", read_only=True)
+
+    # alias frontend
+    pvp_2026_con_igv = serializers.DecimalField(
+        source="pvp_2026",
+        max_digits=10,
+        decimal_places=2,
+        read_only=True,
+    )
+
+    class Meta:
+        model = Producto
         fields = [
             "id",
-            "empresa",
+            "editorial",
+            "editorial_nombre",
+            "codigo",
+            "nombre",
             "nivel",
             "grado",
             "area",
             "serie",
-            "descripcion_completa",
-            "soporte",
+            "pvp_2026",
             "pvp_2026_con_igv",
+            "descuento_proveedor",
+            "precio_proveedor",
+            "estado",
         ]
 
 
-# ------------------------------------------------------------------------
-# PANEL COTIZACIONES
-# ------------------------------------------------------------------------
-class CotizacionPanelSerializer(serializers.ModelSerializer):
-    institucion = serializers.CharField(source="institucion.nombre", read_only=True)
-    asesor = serializers.CharField(source="asesor.nombre", read_only=True)
-    tipo_venta = serializers.SerializerMethodField()
+# ✅ Serializer que API V2 espera
+class ProductoCatalogoSerializer(serializers.ModelSerializer):
+    editorial_id = serializers.IntegerField(source="editorial.id", read_only=True)
+    editorial_nombre = serializers.CharField(source="editorial.nombre", read_only=True)
 
     class Meta:
-        model = Cotizacion
-        fields = ["id", "numero_cotizacion", "institucion", "asesor", "tipo_venta", "fecha", "estado"]
-
-    def get_tipo_venta(self, obj):
-        """
-        Obtenemos tipo_venta del primer detalle (en BD está en DetalleCotizacion).
-        Mapea a: PUNTO_DE_VENTA | FERIA | CONSIGNA | — cuando no hay detalles.
-        """
-        det = obj.detalles.first()
-        if not det:
-            return "—"
-
-        tv = (det.tipo_venta or "").upper().strip()
-        if tv in ("PV", "PUNTO_DE_VENTA", "PUNTO DE VENTA"):
-            return "PUNTO_DE_VENTA"
-        if tv == "FERIA":
-            return "FERIA"
-        if tv == "CONSIGNA":
-            return "CONSIGNA"
-        return "—"
+        model = Producto
+        fields = [
+            "id",
+            "codigo",
+            "nombre",
+            "nivel",
+            "area",
+            "grado",
+            "serie",
+            "pvp_2026",
+            "editorial_id",
+            "editorial_nombre",
+        ]
 
 
-# ------------------------------------------------------------------------
-# DETALLES PARA APROBAR (MODAL ADOPCIÓN)
-# ------------------------------------------------------------------------
-class DetalleCotizacionAdopcionSerializer(serializers.ModelSerializer):
-    libro_id = serializers.IntegerField(source="libro.id", read_only=True)
-    pvp_2026_con_igv = serializers.DecimalField(max_digits=10, decimal_places=2, source="libro.pvp_2026_con_igv", read_only=True)
-    tipo_venta = serializers.CharField(read_only=True)
+# ==========================
+# MAESTROS
+# ==========================
+class InstitucionEducativaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = InstitucionEducativa
+        fields = "__all__"
 
 
-    descripcion = serializers.CharField(source="libro.descripcion_completa", read_only=True)
-    area = serializers.CharField(source="libro.area", read_only=True)
-    grado = serializers.CharField(source="libro.grado", read_only=True)
-    es_plan_lector = serializers.SerializerMethodField()
+class AsesorComercialSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AsesorComercial
+        fields = "__all__"
+
+
+# ==========================
+# COTIZACIONES
+# ==========================
+class DetalleCotizacionSerializer(serializers.ModelSerializer):
+    producto_id = serializers.IntegerField(source="producto.id", read_only=True)
+    descripcion = serializers.CharField(source="producto.nombre", read_only=True)
+    area = serializers.CharField(source="producto.area", read_only=True)
+    grado = serializers.CharField(source="producto.grado", read_only=True)
+    nivel = serializers.CharField(source="producto.nivel", read_only=True)
+    editorial = serializers.CharField(source="producto.editorial.nombre", read_only=True)
+    pvp_2026_con_igv = serializers.DecimalField(
+        source="producto.pvp_2026", max_digits=10, decimal_places=2, read_only=True
+    )
+
+    utilidad_be_x_un = serializers.SerializerMethodField()
+    roi_percent = serializers.SerializerMethodField()
+
+    def get_utilidad_be_x_un(self, obj):
+        # compat: guardas utilidad BE x un en roi_ie
+        return obj.roi_ie or 0
+
+    def get_roi_percent(self, obj):
+        try:
+            if obj.precio_proveedor and obj.precio_proveedor > 0:
+                return (obj.roi_ie / obj.precio_proveedor) * 100
+        except Exception:
+            pass
+        return 0
 
     class Meta:
         model = DetalleCotizacion
         fields = [
             "id",
-            "libro_id",
-            "tipo_venta",
-            "pvp_2026_con_igv",
+            "cotizacion",
+            "producto",
+            "producto_id",
             "descripcion",
             "area",
             "grado",
-            "es_plan_lector",
-        ]
-
-    def get_es_plan_lector(self, obj):
-        a = obj.libro.area or ""
-        return "lector" in a.lower()
-
-
-
-class CotizacionDetalleSerializer(serializers.ModelSerializer):
-    """
-    Serializer que usa el modal de aprobación:
-    trae cabecera (institución/asesor/fecha) + lista de libros con flag plan lector.
-    """
-    institucion = serializers.CharField(source="institucion.nombre", read_only=True)
-    asesor = serializers.CharField(source="asesor.nombre", read_only=True)
-    detalles = serializers.SerializerMethodField()
-
-    class Meta:
-        model = Cotizacion
-        fields = ["id", "numero_cotizacion", "institucion", "asesor", "fecha", "detalles"]
-
-    def get_detalles(self, obj):
-        qs = obj.detalles.select_related("libro").all()
-        return DetalleCotizacionAdopcionSerializer(qs, many=True).data
-
-
-# ------------------------------------------------------------------------
-# COTIZACIÓN (DETALLE PARA PDF/VER)
-# Encabezados según modalidad (PV/FERIA vs CONSIGNA)
-# ------------------------------------------------------------------------
-class DetalleParaPDFSerializer(serializers.ModelSerializer):
-    # columnas comunes
-    empresa = serializers.CharField(source="libro.empresa", read_only=True)
-    nivel = serializers.CharField(source="libro.nivel", read_only=True)
-    grado = serializers.CharField(source="libro.grado", read_only=True)
-    area = serializers.CharField(source="libro.area", read_only=True)
-    descripcion_completa = serializers.CharField(source="libro.descripcion_completa", read_only=True)
-    pvp_2026_con_igv = serializers.DecimalField(max_digits=10, decimal_places=2, source="libro.pvp_2026_con_igv", read_only=True)
-
-    # PV / FERIA
-    precio_ie = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
-    precio_ppff = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
-    utilidad_ie = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
-
-    # CONSIGNA
-    desc_consigna = serializers.DecimalField(max_digits=5, decimal_places=2, required=False)
-    precio_consigna = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
-
-    class Meta:
-        model = DetalleCotizacion
-        fields = [
-            # comunes
-            "empresa", "nivel", "grado", "area", "descripcion_completa", "pvp_2026_con_igv",
-            # pv/feria
-            "precio_ie", "precio_ppff", "utilidad_ie",
-            # consigna
-            "desc_consigna", "precio_consigna",
+            "nivel",
+            "editorial",
+            "pvp_2026_con_igv",
+            "cantidad",
+            "precio_be",
+            "desc_proveedor",
+            "precio_proveedor",
+            "descuento_ie",
+            "precio_ie",
+            "precio_ppff",
+            "utilidad_ie",
+            "roi_ie",
+            "utilidad_be_x_un",
+            "roi_percent",
+            "tipo_venta",
         ]
 
 
 class CotizacionSerializer(serializers.ModelSerializer):
-    """
-    Para ver/descargar PDF de la cotización con sus detalles ya formateados.
-    """
-    institucion = serializers.CharField(source="institucion.nombre", read_only=True)
-    asesor = serializers.CharField(source="asesor.nombre", read_only=True)
-    tipo_venta = serializers.SerializerMethodField()
-    detalles = DetalleParaPDFSerializer(many=True, source="detalles")
+    institucion_nombre = serializers.CharField(source="institucion.nombre", read_only=True)
+    asesor_nombre = serializers.CharField(source="asesor.nombre", read_only=True)
+    detalles = DetalleCotizacionSerializer(many=True, read_only=True)
 
     class Meta:
         model = Cotizacion
         fields = [
-            "id", "numero_cotizacion", "institucion", "asesor", "fecha", "estado",
-            "tipo_venta", "detalles"
+            "id",
+            "numero_cotizacion",
+            "institucion",
+            "institucion_nombre",
+            "asesor",
+            "asesor_nombre",
+            "fecha",
+            "estado",
+            "motivo_rechazo",
+            "detalles",
         ]
 
-    def get_tipo_venta(self, obj):
-        det = obj.detalles.first()
-        if not det:
-            return "—"
-        tv = (det.tipo_venta or "").upper().strip()
-        if tv in ("PV", "PUNTO_DE_VENTA", "PUNTO DE VENTA"):
-            return "PUNTO_DE_VENTA"
-        if tv == "FERIA":
-            return "FERIA"
-        if tv == "CONSIGNA":
-            return "CONSIGNA"
-        return "—"
 
-
-# ------------------------------------------------------------------------
-# ADOPCIONES (PANEL)
-# ------------------------------------------------------------------------
-class AdopcionPanelSerializer(serializers.ModelSerializer):
-    numero_cotizacion = serializers.CharField(source="cotizacion.numero_cotizacion", read_only=True)
-    institucion = serializers.CharField(source="cotizacion.institucion.nombre", read_only=True)
-    asesor = serializers.CharField(source="cotizacion.asesor.nombre", read_only=True)
-    tipo_venta = serializers.SerializerMethodField()
-    fecha = serializers.SerializerMethodField()
+class CotizacionListSerializer(serializers.ModelSerializer):
+    institucion = serializers.CharField(source="institucion.nombre", read_only=True)
+    asesor = serializers.CharField(source="asesor.nombre", read_only=True)
 
     class Meta:
-        model = Adopcion
+        model = Cotizacion
         fields = [
             "id",
             "numero_cotizacion",
             "institucion",
             "asesor",
-            "tipo_venta",
             "fecha",
-            "modalidad",
-            "cantidad_total",
+            "estado",
         ]
 
-    def get_tipo_venta(self, obj):
-        """Lee el tipo de venta desde el primer detalle de la cotización."""
-        det = obj.cotizacion.detalles.first()
-        if not det:
-            return "—"
 
-        MAPEO = {
-            "PV": "Punto de Venta",
-            "PUNTO_DE_VENTA": "Punto de Venta",
-            "PUNTO DE VENTA": "Punto de Venta",
-            "FERIA": "Feria",
-            "CONSIGNA": "Consignación",
-        }
-
-        clave = (det.tipo_venta or "").upper().strip()
-        return MAPEO.get(clave, clave)
-
-    def get_fecha(self, obj):
-        return obj.fecha_adopcion.strftime("%d/%m/%Y")
+# ✅ API V2 espera estos nombres:
+CotizacionPanelSerializer = CotizacionListSerializer
+CotizacionDetalleSerializer = CotizacionSerializer
 
 
+# ==========================
+# ADOPCIONES
+# ==========================
+class DetalleAdopcionSerializer(serializers.ModelSerializer):
+    producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
+    area = serializers.CharField(source="producto.area", read_only=True)
+    grado = serializers.CharField(source="producto.grado", read_only=True)
+    pvp_2026 = serializers.DecimalField(
+        source="producto.pvp_2026", max_digits=10, decimal_places=2, read_only=True
+    )
 
-# ------------------------------------------------------------------------
-# PEDIDOS (B - mantener)
-# ------------------------------------------------------------------------
+    class Meta:
+        model = DetalleAdopcion
+        fields = [
+            "id",
+            "adopcion",
+            "producto",
+            "producto_nombre",
+            "area",
+            "grado",
+            "pvp_2026",
+            "cantidad_adoptada",
+            "mes_lectura",
+        ]
+
+
+class AdopcionSerializer(serializers.ModelSerializer):
+    numero_cotizacion = serializers.CharField(source="cotizacion.numero_cotizacion", read_only=True)
+    institucion = serializers.CharField(source="cotizacion.institucion.nombre", read_only=True)
+    asesor = serializers.CharField(source="cotizacion.asesor.nombre", read_only=True)
+    detalles = DetalleAdopcionSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Adopcion
+        fields = [
+            "id",
+            "cotizacion",
+            "numero_cotizacion",
+            "institucion",
+            "asesor",
+            "fecha_adopcion",
+            "cantidad_total",
+            "detalles",
+        ]
+
+
+# ✅ API V2 espera este nombre
+AdopcionPanelSerializer = AdopcionSerializer
+
+
+# ==========================
+# PEDIDOS
+# ==========================
+class DetallePedidoSerializer(serializers.ModelSerializer):
+    producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
+
+    class Meta:
+        model = DetallePedido
+        fields = ["id", "pedido", "producto", "producto_nombre", "cantidad", "precio_proveedor"]
+
+
 class PedidoSerializer(serializers.ModelSerializer):
-    numero_cotizacion = serializers.CharField(source="adopcion.cotizacion.numero_cotizacion", read_only=True)
-    institucion = serializers.CharField(source="adopcion.cotizacion.institucion.nombre", read_only=True)
+    numero_cotizacion = serializers.CharField(
+        source="adopcion.cotizacion.numero_cotizacion", read_only=True
+    )
+    detalles = DetallePedidoSerializer(many=True, read_only=True)
 
     class Meta:
         model = Pedido
-        fields = ["id", "numero_cotizacion", "institucion", "fecha_pedido", "estado"]
-# ------------------------------------------------------------------------
-# ASESORES / INSTITUCIONES (faltaban)
-# ------------------------------------------------------------------------
-class AsesorSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = AsesorComercial
-        fields = ["id", "nombre", "correo", "telefono", "estado"]
-
-
-class InstitucionSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = InstitucionEducativa
-        fields = ["id", "nombre", "codigo_modular", "direccion", "distrito", "provincia", "departamento"]
+        fields = ["id", "adopcion", "numero_cotizacion", "fecha_pedido", "estado", "detalles"]
