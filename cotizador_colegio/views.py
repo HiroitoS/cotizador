@@ -1,11 +1,13 @@
 from decimal import Decimal
 from django.db import transaction
 from django.db.models import Q
+from django.http import HttpResponse
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 
 from .models import (
+    Editorial,
     Producto,
     Cotizacion,
     DetalleCotizacion,
@@ -29,12 +31,12 @@ from .serializers import (
     AsesorComercialSerializer,
 )
 
-# ✅ Motor de cálculo
 from .pricing import calcular_item
+from .services_pdf import generar_pdf_cotizacion, generar_pdf_adopcion
 
 
 # =========================================================
-# ✅ PAGINACION
+# PAGINACION
 # =========================================================
 class StandardPagination(PageNumberPagination):
     page_size = 30
@@ -43,7 +45,7 @@ class StandardPagination(PageNumberPagination):
 
 
 # =========================================================
-# ✅ PRODUCTOS (V1)
+# PRODUCTOS (V1)
 # =========================================================
 class ListarProductosView(APIView):
     def get(self, request):
@@ -63,7 +65,12 @@ class ListarProductosView(APIView):
             )
 
         if editorial:
-            qs = qs.filter(editorial__nombre__iexact=editorial)
+            # Front recomendado manda ID; mantenemos compatibilidad con nombre
+            try:
+                eid = int(editorial)
+                qs = qs.filter(editorial_id=eid)
+            except Exception:
+                qs = qs.filter(editorial__nombre__iexact=editorial)
 
         if nivel:
             qs = qs.filter(nivel__iexact=nivel)
@@ -84,32 +91,31 @@ class FiltrosProductosView(APIView):
     def get(self, request):
         qs = Producto.objects.select_related("editorial").filter(estado=True)
 
-        editoriales = (
-            qs.values_list("editorial__nombre", flat=True).distinct().order_by("editorial__nombre")
+        editoriales = list(
+            Editorial.objects.filter(productos__estado=True)
+            .distinct()
+            .order_by("nombre")
+            .values("id", "nombre")
         )
-        niveles = qs.values_list("nivel", flat=True).distinct().exclude(nivel="").order_by("nivel")
-        areas = qs.values_list("area", flat=True).distinct().exclude(area="").order_by("area")
-        grados = qs.values_list("grado", flat=True).distinct().exclude(grado="").order_by("grado")
+
+        niveles = list(qs.values_list("nivel", flat=True).distinct().exclude(nivel="").order_by("nivel"))
+        areas = list(qs.values_list("area", flat=True).distinct().exclude(area="").order_by("area"))
+        grados = list(qs.values_list("grado", flat=True).distinct().exclude(grado="").order_by("grado"))
 
         return Response(
             {
-                "editoriales": list(editoriales),
-                "niveles": list(niveles),
-                "areas": list(areas),
-                "grados": list(grados),
+                "editoriales": editoriales,
+                "niveles": niveles,
+                "areas": areas,
+                "grados": grados,
             }
         )
 
 
 # =========================================================
-# ✅ CALCULO (V1)
+# CALCULO (V1)
 # =========================================================
 class CalcularDetalleView(APIView):
-    """
-    POST /cotizaciones/calcular_detalle/
-    body: { producto_id, tipo_venta, precio_be, descuento_ie, precio_ppff, comi_coo, desc_consigna, comision }
-    """
-
     def post(self, request):
         try:
             producto_id = request.data.get("producto_id")
@@ -129,11 +135,6 @@ class CalcularDetalleView(APIView):
 
 
 class CalcularBatchView(APIView):
-    """
-    POST /cotizaciones/calcular_batch/
-    body: { tipo_venta, items: [{producto_id, ...campos}] }
-    """
-
     def post(self, request):
         try:
             tipo_venta = request.data.get("tipo_venta")
@@ -148,8 +149,7 @@ class CalcularBatchView(APIView):
             productos_ids = [x.get("producto_id") for x in items if x.get("producto_id")]
             productos = {
                 p.id: p
-                for p in Producto.objects.filter(id__in=productos_ids)
-                .select_related("editorial")
+                for p in Producto.objects.filter(id__in=productos_ids).select_related("editorial")
             }
 
             out_items = []
@@ -166,14 +166,9 @@ class CalcularBatchView(APIView):
 
 
 # =========================================================
-# ✅ COTIZACIONES (V1)
+# COTIZACIONES (V1)
 # =========================================================
 class GuardarCotizacionView(APIView):
-    """
-    POST /cotizaciones/guardar/
-    body: { institucion_id, asesor_id, tipo_venta, items:[{producto_id, ...}] }
-    """
-
     @transaction.atomic
     def post(self, request):
         try:
@@ -207,7 +202,6 @@ class GuardarCotizacionView(APIView):
 
                 calc = calcular_item(tipo_venta, productos[pid], x)
 
-                # Para que no rompa si el tipo es CONSIGNA
                 descuento_ie = Decimal(calc.get("descuento_ie", 0) or 0)
                 precio_ie = Decimal(calc.get("precio_ie", calc.get("precio_consigna", 0)) or 0)
                 precio_ppff = Decimal(calc.get("precio_ppff", 0) or 0)
@@ -224,7 +218,6 @@ class GuardarCotizacionView(APIView):
                     precio_ie=precio_ie,
                     precio_ppff=precio_ppff,
                     utilidad_ie=utilidad_ie,
-                    # Compatibilidad: guardas utilidad BE x un en roi_ie
                     roi_ie=Decimal(calc.get("utilidad_be_x_un") or 0),
                     tipo_venta=calc.get("tipo_venta"),
                 )
@@ -237,7 +230,7 @@ class GuardarCotizacionView(APIView):
 
 class ListarCotizacionesView(APIView):
     def get(self, request):
-        qs = Cotizacion.objects.select_related("institucion", "asesor").order_by("-id")
+        qs = Cotizacion.objects.select_related("institucion", "asesor").prefetch_related("detalles").order_by("-id")
         return Response(CotizacionListSerializer(qs, many=True).data, status=200)
 
 
@@ -255,11 +248,6 @@ class DetalleCotizacionRetrieveView(APIView):
 
 
 class CambiarEstadoCotizacionView(APIView):
-    """
-    PATCH /cotizaciones/<id>/estado/
-    body: {estado, motivo}
-    """
-
     def patch(self, request, pk):
         try:
             cot = Cotizacion.objects.get(pk=pk)
@@ -283,23 +271,28 @@ class CambiarEstadoCotizacionView(APIView):
             return Response({"detail": "Cotización no existe"}, status=404)
 
 
-# =========================================================
-# ✅ PDF (stubs)
-# =========================================================
 class PDFCotizacionView(APIView):
     def get(self, request, pk):
-        return Response({"detail": "PDF no implementado en este archivo aún."}, status=501)
+        try:
+            cot = (
+                Cotizacion.objects.select_related("institucion", "asesor")
+                .prefetch_related("detalles__producto__editorial")
+                .get(pk=pk)
+            )
+            pdf_bytes = generar_pdf_cotizacion(cot)
+            resp = HttpResponse(pdf_bytes, content_type="application/pdf")
+            resp["Content-Disposition"] = f'attachment; filename="Cotizacion_{cot.numero_cotizacion or cot.id}.pdf"'
+            return resp
+        except Cotizacion.DoesNotExist:
+            return Response({"detail": "Cotización no existe"}, status=404)
+        except Exception as e:
+            return Response({"detail": f"Error PDF: {str(e)}"}, status=400)
 
 
 # =========================================================
-# ✅ ADOPCIONES (V1)
+# ADOPCIONES (V1)
 # =========================================================
 class CrearAdopcionView(APIView):
-    """
-    POST /adopciones/crear/
-    body: { cotizacion_id, items:[{detalle_id, cantidad, mes_lectura}] }
-    """
-
     @transaction.atomic
     def post(self, request):
         try:
@@ -316,7 +309,6 @@ class CrearAdopcionView(APIView):
 
             adopcion, _ = Adopcion.objects.get_or_create(cotizacion=cot)
 
-            # re-guardar: limpia detalles anteriores
             adopcion.detalles.all().delete()
 
             total = 0
@@ -358,7 +350,7 @@ class ListarAdopcionesView(APIView):
     def get(self, request):
         qs = (
             Adopcion.objects.select_related("cotizacion__institucion", "cotizacion__asesor")
-            .prefetch_related("detalles__producto")
+            .prefetch_related("detalles__producto__editorial", "cotizacion__detalles")
             .order_by("-id")
         )
         return Response(AdopcionSerializer(qs, many=True).data, status=200)
@@ -366,28 +358,36 @@ class ListarAdopcionesView(APIView):
 
 class ExportarAdopcionPDFView(APIView):
     def get(self, request, adopcion_id):
-        return Response({"detail": "PDF adopción no implementado en este archivo aún."}, status=501)
+        try:
+            adop = (
+                Adopcion.objects.select_related("cotizacion__institucion", "cotizacion__asesor")
+                .prefetch_related("detalles__producto__editorial", "cotizacion__detalles")
+                .get(id=adopcion_id)
+            )
+            pdf_bytes = generar_pdf_adopcion(adop)
+            resp = HttpResponse(pdf_bytes, content_type="application/pdf")
+            resp["Content-Disposition"] = f'attachment; filename="Adopcion_{adop.cotizacion.numero_cotizacion or adop.id}.pdf"'
+            return resp
+        except Adopcion.DoesNotExist:
+            return Response({"detail": "Adopción no existe"}, status=404)
+        except Exception as e:
+            return Response({"detail": f"Error PDF: {str(e)}"}, status=400)
 
 
 # =========================================================
-# ✅ PEDIDOS (V1)
+# PEDIDOS (V1)
 # =========================================================
 class ListarPedidosView(APIView):
     def get(self, request):
         qs = (
             Pedido.objects.select_related("adopcion__cotizacion")
-            .prefetch_related("detalles__producto")
+            .prefetch_related("detalles__producto__editorial")
             .order_by("-id")
         )
         return Response(PedidoSerializer(qs, many=True).data, status=200)
 
 
 class CrearPedidoView(APIView):
-    """
-    POST /pedidos/crear/
-    body: { adopcion_id }
-    """
-
     @transaction.atomic
     def post(self, request):
         try:
@@ -424,7 +424,7 @@ class CrearPedidoView(APIView):
 
 
 # =========================================================
-# ✅ MAESTROS (V1)
+# MAESTROS (V1)
 # =========================================================
 class ListarAsesoresView(APIView):
     def get(self, request):
