@@ -1,101 +1,228 @@
-from rest_framework import viewsets
-from rest_framework.decorators import action
-from rest_framework.response import Response
-from rest_framework import status
+from django.db.models import Q
 from django.shortcuts import get_object_or_404
 
-from .models import Producto, Cotizacion, Adopcion, Pedido, DetalleCotizacion, EstadoCotizacion
+from rest_framework import viewsets
+from rest_framework.decorators import action
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.response import Response
+
+from .models import (
+    Producto,
+    Editorial,
+    Cotizacion,
+    Adopcion,
+    Pedido,
+)
+
+from .pricing import calcular_item
+
+# ✅ Importamos SOLO lo que realmente existe en serializers.py
 from .serializers import (
     ProductoCatalogoSerializer,
     CotizacionPanelSerializer,
     CotizacionDetalleSerializer,
     AdopcionPanelSerializer,
-    PedidoSerializer,
+    DetalleAdopcionSerializer,   # ✅ este sí existe
+    PedidoSerializer,            # ✅ este sí existe
 )
 
-from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework.filters import SearchFilter
 
-from .pricing import calcular_item
+# =========================================================
+# ✅ PAGINACIÓN ESTÁNDAR (V2)
+# =========================================================
+class StandardPagination(PageNumberPagination):
+    page_size = 30
+    page_size_query_param = "page_size"
+    max_page_size = 200
 
 
+# =========================================================
+# ✅ PRODUCTOS V2 (LIST + FILTERS)
+# /api/v2/productos/
+# /api/v2/productos/filtros/
+# =========================================================
 class ProductoViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = Producto.objects.select_related("editorial").filter(estado=True).order_by("nombre")
     serializer_class = ProductoCatalogoSerializer
-    filter_backends = [DjangoFilterBackend, SearchFilter]
-    filterset_fields = ["editorial", "nivel", "grado", "area"]
-    search_fields = ["nombre", "codigo"]
+    pagination_class = StandardPagination
+
+    def get_queryset(self):
+        qs = Producto.objects.select_related("editorial").filter(estado=True).order_by("id")
+
+        search = self.request.query_params.get("search")
+        editorial = self.request.query_params.get("editorial")  # puede venir ID o nombre
+        nivel = self.request.query_params.get("nivel")
+        area = self.request.query_params.get("area")
+        grado = self.request.query_params.get("grado")
+
+        if search:
+            qs = qs.filter(
+                Q(nombre__icontains=search)
+                | Q(codigo__icontains=search)
+                | Q(editorial__nombre__icontains=search)
+            )
+
+        if editorial:
+            try:
+                eid = int(editorial)
+                qs = qs.filter(editorial_id=eid)
+            except Exception:
+                qs = qs.filter(editorial__nombre__iexact=editorial)
+
+        if nivel:
+            qs = qs.filter(nivel__iexact=nivel)
+
+        if area:
+            qs = qs.filter(area__iexact=area)
+
+        if grado:
+            qs = qs.filter(grado__iexact=grado)
+
+        return qs
+
+    @action(detail=False, methods=["get"], url_path="filtros")
+    def filtros(self, request):
+        qs = Producto.objects.select_related("editorial").filter(estado=True)
+
+        editoriales = list(
+            Editorial.objects.filter(productos__estado=True)
+            .distinct()
+            .order_by("nombre")
+            .values("id", "nombre")
+        )
+
+        niveles = list(
+            qs.values_list("nivel", flat=True)
+            .distinct()
+            .exclude(nivel="")
+            .order_by("nivel")
+        )
+        areas = list(
+            qs.values_list("area", flat=True)
+            .distinct()
+            .exclude(area="")
+            .order_by("area")
+        )
+        grados = list(
+            qs.values_list("grado", flat=True)
+            .distinct()
+            .exclude(grado="")
+            .order_by("grado")
+        )
+
+        return Response(
+            {
+                "editoriales": editoriales,
+                "niveles": niveles,
+                "areas": areas,
+                "grados": grados,
+            },
+            status=200,
+        )
 
 
+# =========================================================
+# ✅ COTIZACIONES V2 (PANEL + DETALLE)
+# =========================================================
 class CotizacionViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = Cotizacion.objects.select_related("institucion", "asesor").prefetch_related("detalles__producto").order_by("-id")
-    serializer_class = CotizacionPanelSerializer
+    pagination_class = StandardPagination
+
+    def get_queryset(self):
+        return (
+            Cotizacion.objects.select_related("institucion", "asesor")
+            .prefetch_related("detalles__producto__editorial")
+            .order_by("-id")
+        )
 
     def get_serializer_class(self):
         if self.action == "retrieve":
             return CotizacionDetalleSerializer
         return CotizacionPanelSerializer
 
-    @action(detail=False, methods=["post"], url_path="calcular-batch")
-    def calcular_batch(self, request):
-        """
-        POST /api/v2/cotizaciones/calcular-batch/
-        { tipo_venta, items: [{producto_id, precio_be, descuento_ie, precio_ppff, desc_consigna, comision, comi_coo}] }
-        """
-        data = request.data or {}
-        tipo_venta = (data.get("tipo_venta") or "").upper().strip()
-        items = data.get("items") or []
 
-        if not tipo_venta:
-            return Response({"detail": "tipo_venta es requerido."}, status=400)
-        if not isinstance(items, list) or not items:
-            return Response({"detail": "items debe ser una lista no vacía."}, status=400)
-
-        out_items = []
-        for it in items:
-            pid = it.get("producto_id")
-            if not pid:
-                return Response({"detail": "Cada item requiere producto_id."}, status=400)
-
-            producto = get_object_or_404(Producto, id=pid)
-            try:
-                calc = calcular_item(tipo_venta, producto, it)
-            except ValueError as e:
-                return Response({"detail": str(e)}, status=400)
-
-            out_items.append(calc)
-
-        # totales simples (fase 1)
-        total_bruto = sum([float(i.get("precio_ie", i.get("precio_consigna", 0))) for i in out_items])
-        total_utilidad = sum([float(i.get("utilidad_be_x_un", 0)) for i in out_items])
-
-        return Response({
-            "tipo_venta": tipo_venta,
-            "items": out_items,
-            "totales": {
-                "total_bruto": round(total_bruto, 2),
-                "total_utilidad": round(total_utilidad, 2),
-            }
-        }, status=200)
-
-    @action(detail=True, methods=["patch"], url_path="estado")
-    def cambiar_estado(self, request, pk=None):
-        cot = self.get_object()
-        estado = (request.data.get("estado") or "").upper().strip()
-
-        if estado not in ["APROBADA", "RECHAZADA", "PENDIENTE", "ADOPTADA"]:
-            return Response({"detail": "Estado inválido."}, status=400)
-
-        cot.estado = estado
-        cot.save(update_fields=["estado"])
-        return Response({"detail": "Estado actualizado.", "estado": cot.estado}, status=200)
-
-
+# =========================================================
+# ✅ ADOPCIONES V2 (PANEL + DETALLE)
+# =========================================================
 class AdopcionViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = Adopcion.objects.select_related("cotizacion", "cotizacion__institucion", "cotizacion__asesor").order_by("-id")
-    serializer_class = AdopcionPanelSerializer
+    pagination_class = StandardPagination
+
+    def get_queryset(self):
+        return (
+            Adopcion.objects.select_related("cotizacion__institucion", "cotizacion__asesor")
+            .prefetch_related("detalles__producto__editorial", "cotizacion__detalles")
+            .order_by("-id")
+        )
+
+    def get_serializer_class(self):
+        # En tu caso usaremos el mismo serializer para list/retrieve
+        return AdopcionPanelSerializer
 
 
+# =========================================================
+# ✅ PEDIDOS V2
+# =========================================================
 class PedidoViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = Pedido.objects.select_related("adopcion").order_by("-fecha_pedido")
     serializer_class = PedidoSerializer
+    pagination_class = StandardPagination
+
+    def get_queryset(self):
+        return (
+            Pedido.objects.select_related("adopcion__cotizacion")
+            .prefetch_related("detalles__producto__editorial")
+            .order_by("-id")
+        )
+
+
+# =========================================================
+# ✅ CALCULO V2 (OPCIONAL)
+# =========================================================
+class CalculoViewSet(viewsets.ViewSet):
+
+    @action(detail=False, methods=["post"], url_path="detalle")
+    def detalle(self, request):
+        try:
+            producto_id = request.data.get("producto_id")
+            tipo_venta = request.data.get("tipo_venta")
+
+            if not producto_id:
+                return Response({"detail": "producto_id es requerido"}, status=400)
+
+            producto = get_object_or_404(
+                Producto.objects.select_related("editorial"),
+                id=producto_id
+            )
+
+            out = calcular_item(tipo_venta, producto, request.data)
+            return Response(out, status=200)
+
+        except Exception as e:
+            return Response({"detail": f"Error cálculo: {str(e)}"}, status=400)
+
+    @action(detail=False, methods=["post"], url_path="batch")
+    def batch(self, request):
+        try:
+            tipo_venta = request.data.get("tipo_venta")
+            items = request.data.get("items", [])
+
+            if not tipo_venta:
+                return Response({"detail": "tipo_venta es requerido"}, status=400)
+
+            if not isinstance(items, list) or not items:
+                return Response({"detail": "items debe ser una lista no vacía"}, status=400)
+
+            ids = [x.get("producto_id") for x in items if x.get("producto_id")]
+            productos = {
+                p.id: p
+                for p in Producto.objects.filter(id__in=ids).select_related("editorial")
+            }
+
+            out_items = []
+            for x in items:
+                pid = x.get("producto_id")
+                if not pid or pid not in productos:
+                    continue
+                out_items.append(calcular_item(tipo_venta, productos[pid], x))
+
+            return Response({"tipo_venta": tipo_venta, "items": out_items}, status=200)
+
+        except Exception as e:
+            return Response({"detail": f"Error batch: {str(e)}"}, status=400)

@@ -13,6 +13,21 @@ from .models import (
 )
 
 
+# =========================================================
+# Helpers (para no repetir lógica)
+# =========================================================
+def _tipo_venta_value(cotizacion_obj):
+    """
+    El tipo_venta se guarda en DetalleCotizacion (por item),
+    pero para paneles lo mostramos tomando el primer detalle.
+    """
+    try:
+        det = cotizacion_obj.detalles.first()
+        return det.tipo_venta if det else ""
+    except Exception:
+        return ""
+
+
 # ==========================
 # EDITORIALES / PRODUCTOS
 # ==========================
@@ -25,7 +40,7 @@ class EditorialSerializer(serializers.ModelSerializer):
 class ProductoSerializer(serializers.ModelSerializer):
     editorial_nombre = serializers.CharField(source="editorial.nombre", read_only=True)
 
-    # alias para compatibilidad con frontend
+    # ✅ alias para compatibilidad con tu frontend (usa pvp_2026_con_igv)
     pvp_2026_con_igv = serializers.DecimalField(
         source="pvp_2026", max_digits=10, decimal_places=2, read_only=True
     )
@@ -76,17 +91,18 @@ class DetalleCotizacionSerializer(serializers.ModelSerializer):
     grado = serializers.CharField(source="producto.grado", read_only=True)
     nivel = serializers.CharField(source="producto.nivel", read_only=True)
     editorial = serializers.CharField(source="producto.editorial.nombre", read_only=True)
+
+    # alias para frontend
     pvp_2026_con_igv = serializers.DecimalField(
         source="producto.pvp_2026", max_digits=10, decimal_places=2, read_only=True
     )
 
-    # tu tabla usa:
+    # ✅ tu tabla usa estos:
     utilidad_be_x_un = serializers.SerializerMethodField()
     roi_percent = serializers.SerializerMethodField()
 
     def get_utilidad_be_x_un(self, obj):
-        # En tu backend guardas compatibilidad histórica:
-        # roi_ie = utilidad BE x unidad
+        # En tu backend guardas esto en roi_ie como compat histórica
         return obj.roi_ie
 
     def get_roi_percent(self, obj):
@@ -130,12 +146,11 @@ class CotizacionSerializer(serializers.ModelSerializer):
     asesor_nombre = serializers.CharField(source="asesor.nombre", read_only=True)
     detalles = DetalleCotizacionSerializer(many=True, read_only=True)
 
-    # ✅ Para mostrar tipo de venta también en detalle
+    # ✅ para detalle (pantalla cotización)
     tipo_venta = serializers.SerializerMethodField()
 
     def get_tipo_venta(self, obj):
-        det = obj.detalles.first()
-        return det.tipo_venta if det else ""
+        return _tipo_venta_value(obj)
 
     class Meta:
         model = Cotizacion
@@ -158,12 +173,11 @@ class CotizacionListSerializer(serializers.ModelSerializer):
     institucion = serializers.CharField(source="institucion.nombre", read_only=True)
     asesor = serializers.CharField(source="asesor.nombre", read_only=True)
 
-    # ✅ Panel pide tipo_venta pero no existe en Cotizacion: lo calculamos
+    # ✅ panel cotizaciones pide tipo_venta (no existe en Cotizacion)
     tipo_venta = serializers.SerializerMethodField()
 
     def get_tipo_venta(self, obj):
-        det = obj.detalles.first()
-        return det.tipo_venta if det else ""
+        return _tipo_venta_value(obj)
 
     class Meta:
         model = Cotizacion
@@ -210,15 +224,18 @@ class AdopcionSerializer(serializers.ModelSerializer):
     asesor = serializers.CharField(source="cotizacion.asesor.nombre", read_only=True)
     detalles = DetalleAdopcionSerializer(many=True, read_only=True)
 
-    # ✅ Alias que el frontend está usando (a.fecha)
+    # ✅ alias que tu frontend está usando (a.fecha)
     fecha = serializers.DateField(source="fecha_adopcion", read_only=True)
 
     # ✅ tipo_venta para panel adopciones
     tipo_venta = serializers.SerializerMethodField()
 
     def get_tipo_venta(self, obj):
-        det = obj.cotizacion.detalles.first()
-        return det.tipo_venta if det else ""
+        try:
+            det = obj.cotizacion.detalles.first()
+            return det.tipo_venta if det else ""
+        except Exception:
+            return ""
 
     class Meta:
         model = Adopcion
@@ -257,9 +274,8 @@ class PedidoSerializer(serializers.ModelSerializer):
 
 
 # =========================================================
-# ✅ Serializers extra para API V2 (para que NO reviente api_v2.py)
+# ✅ Serializers extra / aliases para API V2 (no rompe tu V1)
 # =========================================================
-
 class ProductoCatalogoSerializer(serializers.ModelSerializer):
     editorial_id = serializers.IntegerField(source="editorial.id", read_only=True)
     editorial_nombre = serializers.CharField(source="editorial.nombre", read_only=True)
@@ -280,7 +296,16 @@ class ProductoCatalogoSerializer(serializers.ModelSerializer):
         ]
 
 
-# Aliases que api_v2.py importa
+# Aliases que un api_v2.py suele importar
 CotizacionPanelSerializer = CotizacionListSerializer
 CotizacionDetalleSerializer = CotizacionSerializer
 AdopcionPanelSerializer = AdopcionSerializer
+# =========================================================
+# ✅ ALIASES PARA API V2 / COMPAT
+# =========================================================
+
+# Si quieres tener un "Detalle" específico para adopción en V2:
+AdopcionDetalleSerializer = DetalleAdopcionSerializer
+
+# Si luego quieres tener un serializer de pedidos para panel V2
+PedidoPanelSerializer = PedidoSerializer

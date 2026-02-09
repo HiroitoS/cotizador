@@ -45,6 +45,9 @@ INSTALLED_APPS = [
 
     # app
     "cotizador_colegio.apps.CotizadorColegioConfig",
+    'almacen',
+    'kit'
+    
 ]
 
 

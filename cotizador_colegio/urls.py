@@ -33,7 +33,13 @@ from .services_excel import (
     ExportCotizacionesExcelView,
     ExportAdopcionesExcelView,
     ExportGeneralExcelView,
+    ExportAdopcionesPorColegioExcelView,
+    ExportAdopcionesPorEditorialExcelView,
+    ExportPedidosPorColegioExcelView,
+    ExportPedidosPorEditorialExcelView,
+     ExportRentabilidadExcelView,
 )
+
 
 # ✅ API V2 (ViewSets + Router)
 from .api_v2 import (
@@ -87,6 +93,12 @@ urlpatterns = [
     path("reportes/cotizaciones_excel/", ExportCotizacionesExcelView.as_view(), name="reporte_cotizaciones_excel"),
     path("reportes/adopciones_excel/", ExportAdopcionesExcelView.as_view(), name="reporte_adopciones_excel"),
     path("reportes/general_excel/", ExportGeneralExcelView.as_view(), name="reporte_general_excel"),
+    path("reportes/rentabilidad_excel/", ExportRentabilidadExcelView.as_view(), name="reporte_rentabilidad_excel"),
+    # =========================
+    
+     # ✅ NUEVOS REPORTES INTERNOS (BOOK EXPRESS)
+    path("reportes/adopciones_por_colegio_excel/", ExportAdopcionesPorColegioExcelView.as_view(), name="reporte_adopciones_por_colegio_excel"),
+    path("reportes/adopciones_por_editorial_excel/", ExportAdopcionesPorEditorialExcelView.as_view(), name="reporte_adopciones_por_editorial_excel"),
 
     # =========================
     # MAESTROS (V1)
@@ -98,4 +110,9 @@ urlpatterns = [
     # API V2 (Router)
     # =========================
     path("v2/", include(router.urls)),
+    
+    # ✅ NUEVOS REPORTES INTERNOS (BOOK EXPRESS) - PEDIDOS
+    path("reportes/pedidos_por_colegio_excel/", ExportPedidosPorColegioExcelView.as_view(), name="reporte_pedidos_por_colegio_excel"),
+    path("reportes/pedidos_por_editorial_excel/", ExportPedidosPorEditorialExcelView.as_view(), name="reporte_pedidos_por_editorial_excel"),
+
 ]
